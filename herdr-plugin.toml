@@ -1,0 +1,68 @@
+id = "olivergilan.herdr-jj"
+name = "Herdr JJ"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Create, open, remove, and inspect Jujutsu workspaces from Herdr."
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
+
+[[startup]]
+command = ["./target/release/herdr-jj", "refresh"]
+
+[[actions]]
+id = "create"
+title = "New JJ workspace"
+contexts = ["workspace"]
+command = ["./target/release/herdr-jj", "action", "create"]
+
+[[actions]]
+id = "open"
+title = "Open JJ workspace"
+contexts = ["workspace"]
+command = ["./target/release/herdr-jj", "action", "open"]
+
+[[actions]]
+id = "remove"
+title = "Remove JJ workspace"
+contexts = ["workspace"]
+command = ["./target/release/herdr-jj", "action", "remove"]
+
+[[actions]]
+id = "refresh-status"
+title = "Refresh JJ status"
+contexts = ["workspace", "global"]
+command = ["./target/release/herdr-jj", "refresh"]
+
+[[events]]
+on = "workspace.created"
+command = ["./target/release/herdr-jj", "refresh"]
+
+[[events]]
+on = "workspace.focused"
+command = ["./target/release/herdr-jj", "refresh"]
+
+[[panes]]
+id = "create"
+title = "New JJ workspace"
+placement = "popup"
+width = 78
+height = 16
+command = ["./target/release/herdr-jj", "pane", "create"]
+
+[[panes]]
+id = "open"
+title = "Open JJ workspace"
+placement = "popup"
+width = 86
+height = 22
+command = ["./target/release/herdr-jj", "pane", "open"]
+
+[[panes]]
+id = "remove"
+title = "Remove JJ workspace"
+placement = "popup"
+width = 82
+height = 16
+command = ["./target/release/herdr-jj", "pane", "remove"]
