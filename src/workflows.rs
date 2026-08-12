@@ -1,6 +1,7 @@
 use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -9,8 +10,7 @@ use crate::config::Config;
 use crate::herdr::{Herdr, InvocationContext, Snapshot, required_source};
 use crate::jj::JjRepository;
 use crate::ui::{
-    CreateDialog, OpenEntry, RemoveDialog, create_dialog, generated_name, open_dialog,
-    remove_dialog,
+    CreateDialog, OpenEntry, create_dialog, generated_name, open_dialog, remove_dialog,
 };
 
 const SOURCE_CWD: &str = "HERDR_JJ_SOURCE_CWD";
@@ -161,19 +161,55 @@ fn remove_workspace() -> Result<()> {
         anyhow::bail!("refusing to remove the main JJ workspace");
     }
     let workspace_name = repository.current_workspace_name()?;
-    let status = repository.snapshot_current()?;
-    if !remove_dialog(RemoveDialog {
-        workspace_name: &workspace_name,
-        root: &repository.current_root,
-        status: &status,
-    })? {
+    if !remove_dialog()? {
         return Ok(());
     }
 
-    repository.remove_current_workspace(&workspace_name)?;
+    let staged_checkout = repository.stage_current_workspace_removal(&workspace_name)?;
+    spawn_cleanup(&staged_checkout)?;
     Herdr::from_env()
         .close_workspace(&workspace_id)
         .context("JJ workspace was removed, but its HerdR workspace could not be closed")
+}
+
+pub fn cleanup(path: &Path) -> Result<()> {
+    let config = Config::load()?;
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if !path.is_absolute()
+        || !path.starts_with(&config.workspace_root)
+        || !name.starts_with('.')
+        || !name.contains(".herdr-jj-removing-")
+    {
+        anyhow::bail!(
+            "refusing to delete invalid cleanup path: {}",
+            path.display()
+        );
+    }
+    std::fs::remove_dir_all(path)
+        .with_context(|| format!("could not delete staged checkout {}", path.display()))
+}
+
+fn spawn_cleanup(path: &Path) -> Result<()> {
+    let executable = env::current_exe().context("could not locate the plugin executable")?;
+    let mut command = Command::new(executable);
+    command
+        .arg("cleanup")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+        .spawn()
+        .context("could not start background checkout cleanup")?;
+    Ok(())
 }
 
 fn report_one(herdr: &Herdr, workspace_id: &str, cwd: &Path, remote: &str) -> Result<()> {

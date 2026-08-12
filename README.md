@@ -133,14 +133,11 @@ new JJ working-copy change on that commit, then opens the checkout in Herdr. If
 Herdr creation fails, the plugin forgets the new JJ workspace and removes only
 the files created by that operation.
 
-Removal shows the workspace, checkout, current change, file count, and bookmarks.
-After confirmation, it snapshots the working copy, moves the checkout to a
-temporary sibling path, forgets the JJ workspace, and deletes the temporary path.
-If `jj workspace forget` fails, the plugin moves the checkout back. Existing
-bookmarks remain unchanged.
-
-Ignored files are outside JJ history. The removal popup warns that these files
-will be deleted with the checkout.
+After confirmation, removal snapshots the working copy, moves the checkout to a
+temporary sibling path, and forgets the JJ workspace. If `jj workspace forget`
+fails, the plugin moves the checkout back. Existing bookmarks remain unchanged.
+The temporary checkout is deleted in the background so the Herdr workspace can
+close immediately.
 
 The main JJ workspace cannot be removed through the plugin.
 

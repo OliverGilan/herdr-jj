@@ -246,7 +246,7 @@ impl JjRepository {
         Ok(())
     }
 
-    pub fn remove_current_workspace(&self, workspace_name: &str) -> Result<()> {
+    pub fn stage_current_workspace_removal(&self, workspace_name: &str) -> Result<PathBuf> {
         if self.is_main_workspace() {
             bail!("refusing to remove the main JJ workspace");
         }
@@ -288,9 +288,7 @@ impl JjRepository {
             };
         }
 
-        fs::remove_dir_all(&tombstone)
-            .with_context(|| format!("could not delete {}", tombstone.display()))?;
-        Ok(())
+        Ok(tombstone)
     }
 
     pub fn change_status(&self, root: &Path, remote: &str) -> Result<ChangeStatus> {
@@ -631,9 +629,10 @@ mod tests {
         let child = JjRepository::discover(&created.root).unwrap();
         let removed_change = child.snapshot_current().unwrap();
 
-        child.remove_current_workspace("throwaway").unwrap();
+        let staged = child.stage_current_workspace_removal("throwaway").unwrap();
 
         assert!(!created.root.exists());
+        assert!(staged.exists());
         assert!(
             repository
                 .list_workspaces()
@@ -655,6 +654,7 @@ mod tests {
             ),
             removed_change.commit_id
         );
+        fs::remove_dir_all(staged).unwrap();
     }
 
     #[test]
@@ -662,7 +662,9 @@ mod tests {
         let fixture = JjFixture::new();
         let repository = JjRepository::discover(&fixture.main).unwrap();
 
-        let error = repository.remove_current_workspace("default").unwrap_err();
+        let error = repository
+            .stage_current_workspace_removal("default")
+            .unwrap_err();
 
         assert!(error.to_string().contains("main JJ workspace"));
         assert!(fixture.main.exists());

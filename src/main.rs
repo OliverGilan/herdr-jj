@@ -13,10 +13,11 @@ fn main() -> ExitCode {
     let interactive = args.first().is_some_and(|value| value == "pane");
     let result: anyhow::Result<()> = match args.as_slice() {
         [command] if command == "refresh" => workflows::refresh_status(),
+        [command, path] if command == "cleanup" => workflows::cleanup(std::path::Path::new(path)),
         [command, action] if command == "action" => workflows::open_action(action),
         [command, pane] if command == "pane" => workflows::run_pane(pane),
         _ => Err(anyhow::anyhow!(
-            "usage: herdr-jj <refresh | action <create|open|remove> | pane <create|open|remove>>"
+            "usage: herdr-jj <refresh | cleanup <path> | action <create|open|remove> | pane <create|open|remove>>"
         )),
     };
 

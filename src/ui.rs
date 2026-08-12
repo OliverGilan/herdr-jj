@@ -1,5 +1,4 @@
 use std::io;
-use std::path::Path;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -13,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 
-use crate::jj::{ChangeStatus, WorkspaceEntry, valid_workspace_name};
+use crate::jj::{WorkspaceEntry, valid_workspace_name};
 
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
@@ -39,12 +38,6 @@ pub struct OpenChoice {
 pub struct OpenEntry {
     pub workspace: WorkspaceEntry,
     pub open_workspace_id: Option<String>,
-}
-
-pub struct RemoveDialog<'a> {
-    pub workspace_name: &'a str,
-    pub root: &'a Path,
-    pub status: &'a ChangeStatus,
 }
 
 pub fn create_dialog(dialog: CreateDialog) -> io::Result<Option<CreateChoice>> {
@@ -132,10 +125,10 @@ pub fn open_dialog(entries: Vec<OpenEntry>) -> io::Result<Option<OpenChoice>> {
     })
 }
 
-pub fn remove_dialog(dialog: RemoveDialog<'_>) -> io::Result<bool> {
+pub fn remove_dialog() -> io::Result<bool> {
     with_terminal(|terminal| {
         loop {
-            terminal.draw(|frame| draw_remove(frame, &dialog))?;
+            terminal.draw(draw_remove)?;
             let Event::Key(key) = event::read()? else {
                 continue;
             };
@@ -273,51 +266,25 @@ fn draw_open(frame: &mut Frame, query: &str, entries: &[&OpenEntry], selected: u
     footer(frame, rows[2], "Enter open", "Esc cancel");
 }
 
-fn draw_remove(frame: &mut Frame, dialog: &RemoveDialog<'_>) {
+fn draw_remove(frame: &mut Frame) {
     let inner = shell(frame);
     let rows = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(2),
-        Constraint::Length(2),
-        Constraint::Length(2),
-        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Min(1),
     ])
     .split(inner);
-    field(frame, rows[0], "Workspace", dialog.workspace_name, false);
-    field(
-        frame,
-        rows[1],
-        "Checkout",
-        &dialog.root.display().to_string(),
-        false,
-    );
-    let bookmarks = if dialog.status.bookmarks.is_empty() {
-        "none".to_owned()
-    } else {
-        dialog.status.bookmarks.join(" ")
-    };
-    field(
-        frame,
-        rows[2],
-        "Change",
-        &format!(
-            "@{}  files={}  bookmarks={bookmarks}",
-            dialog.status.change_id, dialog.status.changed_files
-        ),
-        false,
-    );
     frame.render_widget(
-        Paragraph::new("The checkout directory will be deleted.")
+        Paragraph::new("Are you sure you want to remove this workspace?")
             .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-        rows[3],
+        rows[0],
     );
     frame.render_widget(
-        Paragraph::new("Ignored files are outside JJ history and will also be deleted.")
-            .style(Style::default().fg(Color::Yellow)),
-        rows[4],
+        Paragraph::new("Your branch will not be removed.").style(Style::default().fg(MUTED)),
+        rows[1],
     );
-    footer(frame, rows[5], "Enter remove", "Esc cancel");
+    danger_footer(frame, rows[3], "Enter remove", "Esc cancel");
 }
 
 fn shell(frame: &mut Frame) -> Rect {
@@ -345,13 +312,21 @@ fn field(frame: &mut Frame, area: Rect, label: &str, value: &str, active: bool) 
 }
 
 fn footer(frame: &mut Frame, area: Rect, primary: &str, secondary: &str) {
+    action_footer(frame, area, primary, secondary, ACCENT);
+}
+
+fn danger_footer(frame: &mut Frame, area: Rect, primary: &str, secondary: &str) {
+    action_footer(frame, area, primary, secondary, Color::Red);
+}
+
+fn action_footer(frame: &mut Frame, area: Rect, primary: &str, secondary: &str, color: Color) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
                 format!(" {primary} "),
                 Style::default()
                     .fg(Color::Black)
-                    .bg(ACCENT)
+                    .bg(color)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
