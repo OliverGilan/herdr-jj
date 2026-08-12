@@ -1,20 +1,16 @@
 # Herdr JJ
 
 Jujutsu workspace support for [Herdr](https://herdr.dev). Create, open, remove,
-and inspect JJ workspaces without using Git worktrees.
+and inspect JJ workspaces with Herdr spaces.
 
 ## Features
 
-- Create a JJ workspace on top of the exact current `@` change.
-- Replace the generated name by typing a custom workspace name.
-- Toggle bookmark creation in the create popup.
+- Create a JJ workspace when opening a new Herdr space.
+- Automatic bookmark creation on workspace creation.
 - Open an existing JJ workspace or focus its existing Herdr workspace.
-- Remove a secondary JJ workspace after one confirmation.
-- Run a configured command in the new workspace after creation.
+- Remove a workspace when closing a Herdr space.
+- Run a configured hook in the new workspace after creation for setup.
 - Show JJ change and status values in the Herdr Spaces sidebar.
-- Set `GH_REPO` in new panes for GitHub CLI support from non-colocated workspaces.
-
-The plugin never fetches remotes during workspace creation.
 
 ## Requirements
 
