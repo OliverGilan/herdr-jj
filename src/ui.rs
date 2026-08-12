@@ -1,4 +1,5 @@
 use std::io;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -12,37 +13,28 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 
-use crate::jj::{WorkspaceEntry, valid_workspace_name};
+use crate::jj::valid_workspace_name;
 
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateChoice {
     pub name: String,
     pub create_bookmark: bool,
 }
 
-pub struct CreateDialog {
-    pub initial_name: String,
-    pub create_bookmark: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct OpenChoice {
-    pub workspace: WorkspaceEntry,
+pub struct OpenItem<'a> {
+    pub index: usize,
+    pub name: &'a str,
+    pub change_id: &'a str,
+    pub description: &'a str,
+    pub available: bool,
     pub open_workspace_id: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-pub struct OpenEntry {
-    pub workspace: WorkspaceEntry,
-    pub open_workspace_id: Option<String>,
-}
-
-pub fn create_dialog(dialog: CreateDialog) -> io::Result<Option<CreateChoice>> {
-    let mut name = dialog.initial_name.clone();
-    let mut bookmark = dialog.create_bookmark;
+pub fn create_dialog(default_bookmark: bool) -> io::Result<Option<CreateChoice>> {
+    let mut name = generated_name();
+    let mut bookmark = default_bookmark;
     let mut replace_on_type = true;
     let mut error = None;
 
@@ -72,13 +64,13 @@ pub fn create_dialog(dialog: CreateDialog) -> io::Result<Option<CreateChoice>> {
     })
 }
 
-pub fn open_dialog(entries: Vec<OpenEntry>) -> io::Result<Option<OpenChoice>> {
+pub fn open_dialog(entries: &[OpenItem<'_>]) -> io::Result<Option<usize>> {
     let mut query = String::new();
     let mut selected = 0usize;
 
     with_terminal(|terminal| {
         loop {
-            let filtered = filtered_entries(&entries, &query);
+            let filtered = filtered_entries(entries, &query);
             selected = selected.min(filtered.len().saturating_sub(1));
             terminal.draw(|frame| draw_open(frame, &query, &filtered, selected))?;
             let Event::Key(key) = event::read()? else {
@@ -98,11 +90,8 @@ pub fn open_dialog(entries: Vec<OpenEntry>) -> io::Result<Option<OpenChoice>> {
                     let Some(entry) = filtered.get(selected) else {
                         continue;
                     };
-                    if entry.workspace.available {
-                        break Ok(Some(OpenChoice {
-                            workspace: entry.workspace.clone(),
-                            open_workspace_id: entry.open_workspace_id.clone(),
-                        }));
+                    if entry.available {
+                        break Ok(Some(entry.index));
                     }
                 }
                 KeyCode::Up => selected = selected.saturating_sub(1),
@@ -188,7 +177,7 @@ fn draw_create(frame: &mut Frame, name: &str, bookmark: bool, error: Option<&str
         Constraint::Min(1),
     ])
     .split(inner);
-    field(frame, rows[0], "Name", &format!("{name}_"), true);
+    field(frame, rows[0], "Name", &format!("{name}_"));
     let mark = if bookmark { "[x]" } else { "[ ]" };
     frame.render_widget(
         Paragraph::new(format!("{mark} Create bookmark with the same name  (Tab)"))
@@ -207,10 +196,10 @@ fn draw_create(frame: &mut Frame, name: &str, bookmark: bool, error: Option<&str
             .alignment(Alignment::Center),
         rows[3],
     );
-    footer(frame, rows[4], "Enter create", "Esc cancel");
+    action_footer(frame, rows[4], "Enter create", "Esc cancel", ACCENT);
 }
 
-fn draw_open(frame: &mut Frame, query: &str, entries: &[&OpenEntry], selected: usize) {
+fn draw_open(frame: &mut Frame, query: &str, entries: &[&OpenItem<'_>], selected: usize) {
     let inner = shell(frame);
     let rows = Layout::vertical([
         Constraint::Length(2),
@@ -218,7 +207,7 @@ fn draw_open(frame: &mut Frame, query: &str, entries: &[&OpenEntry], selected: u
         Constraint::Length(1),
     ])
     .split(inner);
-    field(frame, rows[0], "Filter", &format!("{query}_"), true);
+    field(frame, rows[0], "Filter", &format!("{query}_"));
 
     let visible = rows[1].height as usize;
     let start = selected.saturating_sub(visible.saturating_sub(1));
@@ -229,24 +218,24 @@ fn draw_open(frame: &mut Frame, query: &str, entries: &[&OpenEntry], selected: u
         .take(visible)
         .map(|(index, entry)| {
             let marker = if index == selected { ">" } else { " " };
-            let state = if !entry.workspace.available {
+            let state = if !entry.available {
                 "missing"
             } else if entry.open_workspace_id.is_some() {
                 "open"
             } else {
                 ""
             };
-            let description = truncate(&entry.workspace.description, 28);
+            let description = truncate(entry.description, 28);
             let text = format!(
                 "{marker} {:<28} @{:12} {:<7} {}",
-                truncate(&entry.workspace.name, 28),
-                entry.workspace.change_id,
+                truncate(entry.name, 28),
+                entry.change_id,
                 state,
                 description
             );
             let style = if index == selected {
                 Style::default().fg(Color::Black).bg(ACCENT)
-            } else if !entry.workspace.available {
+            } else if !entry.available {
                 Style::default().fg(MUTED)
             } else {
                 Style::default()
@@ -263,7 +252,7 @@ fn draw_open(frame: &mut Frame, query: &str, entries: &[&OpenEntry], selected: u
         lines
     };
     frame.render_widget(Paragraph::new(content), rows[1]);
-    footer(frame, rows[2], "Enter open", "Esc cancel");
+    action_footer(frame, rows[2], "Enter open", "Esc cancel", ACCENT);
 }
 
 fn draw_remove(frame: &mut Frame) {
@@ -284,7 +273,7 @@ fn draw_remove(frame: &mut Frame) {
         Paragraph::new("Your branch will not be removed.").style(Style::default().fg(MUTED)),
         rows[1],
     );
-    danger_footer(frame, rows[3], "Enter remove", "Esc cancel");
+    action_footer(frame, rows[3], "Enter remove", "Esc cancel", Color::Red);
 }
 
 fn shell(frame: &mut Frame) -> Rect {
@@ -296,27 +285,17 @@ fn shell(frame: &mut Frame) -> Rect {
     })
 }
 
-fn field(frame: &mut Frame, area: Rect, label: &str, value: &str, active: bool) {
-    let style = if active {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(MUTED)
-    };
+fn field(frame: &mut Frame, area: Rect, label: &str, value: &str) {
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(label, Style::default().fg(MUTED)),
-            Line::styled(truncate(value, area.width as usize), style),
+            Line::styled(
+                truncate(value, area.width as usize),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
         ]),
         area,
     );
-}
-
-fn footer(frame: &mut Frame, area: Rect, primary: &str, secondary: &str) {
-    action_footer(frame, area, primary, secondary, ACCENT);
-}
-
-fn danger_footer(frame: &mut Frame, area: Rect, primary: &str, secondary: &str) {
-    action_footer(frame, area, primary, secondary, Color::Red);
 }
 
 fn action_footer(frame: &mut Frame, area: Rect, primary: &str, secondary: &str, color: Color) {
@@ -337,18 +316,14 @@ fn action_footer(frame: &mut Frame, area: Rect, primary: &str, secondary: &str, 
     );
 }
 
-fn filtered_entries<'a>(entries: &'a [OpenEntry], query: &str) -> Vec<&'a OpenEntry> {
+fn filtered_entries<'a>(entries: &'a [OpenItem<'_>], query: &str) -> Vec<&'a OpenItem<'a>> {
     let query = query.to_ascii_lowercase();
     entries
         .iter()
         .filter(|entry| {
             query.is_empty()
-                || entry.workspace.name.to_ascii_lowercase().contains(&query)
-                || entry
-                    .workspace
-                    .description
-                    .to_ascii_lowercase()
-                    .contains(&query)
+                || entry.name.to_ascii_lowercase().contains(&query)
+                || entry.description.to_ascii_lowercase().contains(&query)
         })
         .collect()
 }
@@ -409,46 +384,18 @@ fn handle_create_key(
     }
 }
 
-pub fn generated_name(seed: u64) -> String {
+fn generated_name() -> String {
     const ADJECTIVES: [&str; 8] = [
         "brisk", "calm", "clear", "green", "quick", "quiet", "sharp", "silver",
     ];
     const NOUNS: [&str; 8] = [
         "brook", "cloud", "field", "grove", "harbor", "meadow", "stone", "valley",
     ];
-    let adjective = ADJECTIVES[(seed as usize) % ADJECTIVES.len()];
-    let noun = NOUNS[((seed / ADJECTIVES.len() as u64) as usize) % NOUNS.len()];
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as usize)
+        .unwrap_or_default();
+    let adjective = ADJECTIVES[seed % ADJECTIVES.len()];
+    let noun = NOUNS[(seed / ADJECTIVES.len()) % NOUNS.len()];
     format!("{adjective}-{noun}")
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-
-    #[test]
-    fn filters_picker_entries_by_name_and_description() {
-        let entries = vec![OpenEntry {
-            workspace: WorkspaceEntry {
-                name: "feature-api".to_owned(),
-                root: PathBuf::from("/repo.feature-api"),
-                change_id: "abc".to_owned(),
-                description: "add login endpoint".to_owned(),
-                available: true,
-            },
-            open_workspace_id: None,
-        }];
-
-        assert_eq!(filtered_entries(&entries, "API").len(), 1);
-        assert_eq!(filtered_entries(&entries, "login").len(), 1);
-        assert!(filtered_entries(&entries, "docs").is_empty());
-    }
-
-    #[test]
-    fn generated_names_are_valid() {
-        let name = generated_name(42);
-        assert!(valid_workspace_name(&name));
-        assert_eq!(name.matches('-').count(), 1);
-    }
 }

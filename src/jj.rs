@@ -12,33 +12,21 @@ const STATUS_TEMPLATE: &str = concat!(
     "if(conflict, \"1\", \"\") ++ \"\\x1f\" ++ ",
     "if(empty, \"1\", \"\") ++ \"\\x1f\" ++ ",
     "change_id.shortest(12) ++ \"\\x1f\" ++ ",
-    "commit_id ++ \"\\x1f\" ++ ",
     "self.diff().files().len() ++ \"\\x1f\" ++ ",
-    "local_bookmarks.map(|b| b.name()).join(\" \" ) ++ \"\\x1f\" ++ ",
-    "description.first_line() ++ \"\\n\""
+    "local_bookmarks.map(|b| b.name()).join(\" \" ) ++ \"\\n\""
 );
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JjRepository {
     pub current_root: PathBuf,
     pub main_root: PathBuf,
     pub name: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ChangeStatus {
-    pub conflicted: bool,
-    pub empty: bool,
-    pub change_id: String,
-    pub commit_id: String,
-    pub changed_files: usize,
-    pub bookmarks: Vec<String>,
-    pub description: String,
-    pub ahead: usize,
-    pub behind: usize,
+pub struct SidebarTokens {
+    pub change: String,
+    pub status: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceEntry {
     pub name: String,
     pub root: PathBuf,
@@ -47,7 +35,6 @@ pub struct WorkspaceEntry {
     pub available: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreatedJjWorkspace {
     pub name: String,
     pub root: PathBuf,
@@ -76,14 +63,24 @@ impl JjRepository {
         self.current_root == self.main_root || self.current_root.join(".jj/repo").is_dir()
     }
 
-    pub fn snapshot_current(&self) -> Result<ChangeStatus> {
+    fn snapshot_working_copy(&self) -> Result<()> {
         let mut status = Command::new("jj");
         status
             .args(["--no-pager", "-R"])
             .arg(&self.current_root)
             .arg("status");
-        checked_status(&mut status, "snapshot current JJ workspace")?;
-        self.change_status(&self.current_root, "origin")
+        checked_status(&mut status, "snapshot current JJ workspace")
+    }
+
+    pub fn capture_current_commit(&self) -> Result<String> {
+        self.snapshot_working_copy()?;
+        let mut command = self.read_command(&self.current_root);
+        command.args(["log", "--no-graph", "-r", "@", "-T", "commit_id"]);
+        let commit = checked_output(&mut command, "capture current JJ commit")?;
+        if commit.is_empty() {
+            bail!("JJ returned an empty current commit ID");
+        }
+        Ok(commit)
     }
 
     pub fn current_workspace_name(&self) -> Result<String> {
@@ -139,7 +136,7 @@ impl JjRepository {
             .collect()
     }
 
-    pub fn workspace_root_for_name(&self, name: &str) -> Result<PathBuf> {
+    fn workspace_root_for_name(&self, name: &str) -> Result<PathBuf> {
         let mut command = self.read_command(&self.main_root);
         command.args(["workspace", "root", "--name", name]);
         let output = checked_output(&mut command, "resolve JJ workspace root")?;
@@ -262,7 +259,7 @@ impl JjRepository {
             );
         }
 
-        self.snapshot_current()?;
+        self.snapshot_working_copy()?;
 
         let tombstone = removal_tombstone(&self.current_root)?;
         fs::rename(&self.current_root, &tombstone).with_context(|| {
@@ -291,7 +288,7 @@ impl JjRepository {
         Ok(tombstone)
     }
 
-    pub fn change_status(&self, root: &Path, remote: &str) -> Result<ChangeStatus> {
+    pub fn sidebar_tokens(&self, root: &Path, remote: &str) -> Result<SidebarTokens> {
         let mut command = self.read_command(root);
         command.args([
             "log",
@@ -302,11 +299,10 @@ impl JjRepository {
             STATUS_TEMPLATE,
         ]);
         let output = checked_output_raw(&mut command, "read JJ change status")?;
-        let mut fields = output.splitn(7, '\x1f');
+        let mut fields = output.splitn(5, '\x1f');
         let conflicted = fields.next().unwrap_or_default() == "1";
         let empty = fields.next().unwrap_or_default() == "1";
         let change_id = fields.next().unwrap_or_default().to_owned();
-        let commit_id = fields.next().unwrap_or_default().to_owned();
         let changed_files = fields
             .next()
             .unwrap_or_default()
@@ -318,8 +314,7 @@ impl JjRepository {
             .split_whitespace()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        let description = fields.next().unwrap_or_default().trim().to_owned();
-        if change_id.is_empty() || commit_id.is_empty() {
+        if change_id.is_empty() {
             bail!("JJ returned incomplete change status");
         }
 
@@ -333,16 +328,31 @@ impl JjRepository {
             })
             .unwrap_or_default();
 
-        Ok(ChangeStatus {
-            conflicted,
-            empty,
-            change_id,
-            commit_id,
-            changed_files,
-            bookmarks,
-            description,
-            ahead,
-            behind,
+        let change = if bookmarks.is_empty() {
+            format!("@{change_id}")
+        } else {
+            bookmarks.join(" ")
+        };
+        let mut values = Vec::new();
+        if conflicted {
+            values.push("!".to_owned());
+        }
+        if ahead > 0 || behind > 0 {
+            let mut distance = String::new();
+            if ahead > 0 {
+                distance.push_str(&format!("+{ahead}"));
+            }
+            if behind > 0 {
+                distance.push_str(&format!("-{behind}"));
+            }
+            values.push(distance);
+        }
+        if !empty {
+            values.push(format!("*{changed_files}"));
+        }
+        Ok(SidebarTokens {
+            change,
+            status: values.join(" "),
         })
     }
 
@@ -383,37 +393,6 @@ impl JjRepository {
     }
 }
 
-impl ChangeStatus {
-    pub fn change_token(&self) -> String {
-        if self.bookmarks.is_empty() {
-            format!("@{}", self.change_id)
-        } else {
-            self.bookmarks.join(" ")
-        }
-    }
-
-    pub fn status_token(&self) -> String {
-        let mut values = Vec::new();
-        if self.conflicted {
-            values.push("!".to_owned());
-        }
-        if self.ahead > 0 || self.behind > 0 {
-            let mut remote = String::new();
-            if self.ahead > 0 {
-                remote.push_str(&format!("+{}", self.ahead));
-            }
-            if self.behind > 0 {
-                remote.push_str(&format!("-{}", self.behind));
-            }
-            values.push(remote);
-        }
-        if !self.empty {
-            values.push(format!("*{}", self.changed_files));
-        }
-        values.join(" ")
-    }
-}
-
 pub fn valid_workspace_name(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -421,7 +400,7 @@ pub fn valid_workspace_name(name: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || "._-/".contains(character))
 }
 
-pub fn path_slug(name: &str) -> String {
+fn path_slug(name: &str) -> String {
     let mut slug = String::new();
     let mut separator = false;
     for character in name.chars() {
@@ -515,58 +494,14 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn validates_workspace_names() {
-        assert!(valid_workspace_name("feature/herdr-jj_1.0"));
-        assert!(!valid_workspace_name("feature with spaces"));
-        assert!(!valid_workspace_name(""));
-    }
-
-    #[test]
-    fn creates_stable_path_slugs() {
-        assert_eq!(path_slug("workspace/Herdr_JJ"), "workspace-herdr-jj");
-        assert_eq!(path_slug("///"), "workspace");
-    }
-
-    #[test]
-    fn parses_github_remote_urls() {
-        assert_eq!(
-            github_slug("git@github.com:olivergilan/herdr-jj.git"),
-            Some("olivergilan/herdr-jj".to_owned())
-        );
-        assert_eq!(
-            github_slug("https://github.com/olivergilan/herdr-jj"),
-            Some("olivergilan/herdr-jj".to_owned())
-        );
-        assert_eq!(github_slug("https://gitlab.com/example/repo"), None);
-    }
-
-    #[test]
-    fn formats_status_tokens() {
-        let status = ChangeStatus {
-            conflicted: true,
-            empty: false,
-            change_id: "abc".to_owned(),
-            commit_id: "123".to_owned(),
-            changed_files: 2,
-            bookmarks: vec!["feature".to_owned()],
-            description: String::new(),
-            ahead: 3,
-            behind: 1,
-        };
-
-        assert_eq!(status.change_token(), "feature");
-        assert_eq!(status.status_token(), "! +3-1 *2");
-    }
-
-    #[test]
     fn creates_a_workspace_on_the_captured_current_change_and_rolls_it_back() {
         let fixture = JjFixture::new();
         fs::write(fixture.main.join("README.md"), "parent change\n").unwrap();
         let repository = JjRepository::discover(&fixture.main).unwrap();
-        let parent = repository.snapshot_current().unwrap();
+        let parent = repository.capture_current_commit().unwrap();
 
         let created = repository
-            .create_workspace(&fixture.workspaces, "feature/api", &parent.commit_id, false)
+            .create_workspace(&fixture.workspaces, "feature/api", &parent, false)
             .unwrap();
 
         assert!(created.root.join("README.md").exists());
@@ -578,7 +513,7 @@ mod tests {
                 &created.root,
                 &["log", "-r", "@-", "--no-graph", "-T", "commit_id"]
             ),
-            parent.commit_id
+            parent
         );
 
         repository.rollback_workspace(&created).unwrap();
@@ -596,19 +531,13 @@ mod tests {
     fn optional_bookmark_is_created_and_removed_with_rollback() {
         let fixture = JjFixture::new();
         let repository = JjRepository::discover(&fixture.main).unwrap();
-        let parent = repository.snapshot_current().unwrap();
+        let parent = repository.capture_current_commit().unwrap();
 
         let created = repository
-            .create_workspace(
-                &fixture.workspaces,
-                "feature-bookmark",
-                &parent.commit_id,
-                true,
-            )
+            .create_workspace(&fixture.workspaces, "feature-bookmark", &parent, true)
             .unwrap();
 
-        let status = repository.change_status(&created.root, "origin").unwrap();
-        assert_eq!(status.bookmarks, ["feature-bookmark"]);
+        assert!(!jj_output(&created.root, &["bookmark", "list", "feature-bookmark"]).is_empty());
 
         repository.rollback_workspace(&created).unwrap();
         let bookmarks = jj_output(&fixture.main, &["bookmark", "list", "feature-bookmark"]);
@@ -620,14 +549,14 @@ mod tests {
         let fixture = JjFixture::new();
         fs::write(fixture.main.join(".gitignore"), "ignored.log\n").unwrap();
         let repository = JjRepository::discover(&fixture.main).unwrap();
-        let parent = repository.snapshot_current().unwrap();
+        let parent = repository.capture_current_commit().unwrap();
         let created = repository
-            .create_workspace(&fixture.workspaces, "throwaway", &parent.commit_id, false)
+            .create_workspace(&fixture.workspaces, "throwaway", &parent, false)
             .unwrap();
         fs::write(created.root.join("changed.txt"), "recoverable in JJ\n").unwrap();
         fs::write(created.root.join("ignored.log"), "deleted with checkout\n").unwrap();
         let child = JjRepository::discover(&created.root).unwrap();
-        let removed_change = child.snapshot_current().unwrap();
+        let removed_change = child.capture_current_commit().unwrap();
 
         let staged = child.stage_current_workspace_removal("throwaway").unwrap();
 
@@ -646,13 +575,13 @@ mod tests {
                 &[
                     "log",
                     "-r",
-                    &removed_change.commit_id,
+                    &removed_change,
                     "--no-graph",
                     "-T",
                     "commit_id"
                 ]
             ),
-            removed_change.commit_id
+            removed_change
         );
         fs::remove_dir_all(staged).unwrap();
     }

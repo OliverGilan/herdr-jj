@@ -3,28 +3,26 @@ use std::process::{Command, Output};
 use anyhow::{Context, Result, bail};
 
 pub fn checked_output(command: &mut Command, label: &str) -> Result<String> {
-    let output = command
-        .output()
-        .with_context(|| format!("{label} failed to start"))?;
-    output_text(output, label).map(|value| value.trim().to_owned())
+    output_text(run(command, label)?, label).map(|value| value.trim().to_owned())
 }
 
 pub fn checked_output_raw(command: &mut Command, label: &str) -> Result<String> {
-    let output = command
-        .output()
-        .with_context(|| format!("{label} failed to start"))?;
-    output_text(output, label)
+    output_text(run(command, label)?, label)
 }
 
 pub fn checked_status(command: &mut Command, label: &str) -> Result<()> {
-    let output = command
-        .output()
-        .with_context(|| format!("{label} failed to start"))?;
+    let output = run(command, label)?;
     if output.status.success() {
         Ok(())
     } else {
         bail!(command_error(label, &output))
     }
+}
+
+fn run(command: &mut Command, label: &str) -> Result<Output> {
+    command
+        .output()
+        .with_context(|| format!("{label} failed to start"))
 }
 
 fn output_text(output: Output, label: &str) -> Result<String> {

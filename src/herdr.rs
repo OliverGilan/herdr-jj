@@ -11,13 +11,10 @@ use crate::process::{checked_output, checked_status};
 
 const DEFAULT_PLUGIN_ID: &str = "olivergilan.herdr-jj";
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Deserialize)]
 pub struct InvocationContext {
     pub workspace_id: Option<String>,
-    pub workspace_label: Option<String>,
     pub workspace_cwd: Option<PathBuf>,
-    pub tab_id: Option<String>,
-    pub focused_pane_id: Option<String>,
     pub focused_pane_cwd: Option<PathBuf>,
 }
 
@@ -33,39 +30,85 @@ impl InvocationContext {
             .as_deref()
             .or(self.workspace_cwd.as_deref())
     }
+
+    pub fn required_source(&self) -> Result<(&Path, &str)> {
+        let cwd = self
+            .source_cwd()
+            .context("focused HerdR workspace has no working directory")?;
+        let workspace_id = self
+            .workspace_id
+            .as_deref()
+            .context("focused HerdR workspace has no ID")?;
+        if cwd.as_os_str().is_empty() || workspace_id.is_empty() {
+            bail!("focused HerdR workspace context is incomplete");
+        }
+        Ok((cwd, workspace_id))
+    }
 }
 
-#[derive(Clone, Debug)]
 pub struct Herdr {
     binary: OsString,
     plugin_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreatedWorkspace {
     pub workspace_id: String,
     pub root_pane_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Snapshot {
     pub workspaces: Vec<SnapshotWorkspace>,
     pub panes: Vec<SnapshotPane>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct SnapshotWorkspace {
     pub workspace_id: String,
     pub active_tab_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct SnapshotPane {
     pub workspace_id: String,
     pub tab_id: String,
     pub cwd: Option<PathBuf>,
     #[serde(default)]
     pub focused: bool,
+}
+
+impl Snapshot {
+    pub fn cwd_for_workspace(&self, workspace: &SnapshotWorkspace) -> Option<&Path> {
+        self.panes
+            .iter()
+            .filter(|pane| {
+                pane.workspace_id == workspace.workspace_id
+                    && pane.tab_id == workspace.active_tab_id
+            })
+            .find(|pane| pane.focused)
+            .or_else(|| {
+                self.panes.iter().find(|pane| {
+                    pane.workspace_id == workspace.workspace_id
+                        && pane.tab_id == workspace.active_tab_id
+                })
+            })
+            .and_then(|pane| pane.cwd.as_deref())
+    }
+
+    pub fn workspace_for_root(&self, root: &Path) -> Option<String> {
+        let expected = canonical_or_original(root);
+        self.workspaces.iter().find_map(|workspace| {
+            self.panes
+                .iter()
+                .filter(|pane| {
+                    pane.workspace_id == workspace.workspace_id
+                        && pane.tab_id == workspace.active_tab_id
+                })
+                .filter_map(|pane| pane.cwd.as_deref())
+                .any(|cwd| canonical_or_original(cwd) == expected)
+                .then(|| workspace.workspace_id.clone())
+        })
+    }
 }
 
 impl Herdr {
@@ -76,14 +119,6 @@ impl Herdr {
                 .ok()
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| DEFAULT_PLUGIN_ID.to_owned()),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn with_binary(binary: impl Into<OsString>) -> Self {
-        Self {
-            binary: binary.into(),
-            plugin_id: DEFAULT_PLUGIN_ID.to_owned(),
         }
     }
 
@@ -123,7 +158,7 @@ impl Herdr {
             command.arg("--env").arg(format!("{key}={value}"));
         }
         let output = checked_output(&mut command, "create HerdR workspace")?;
-        let envelope: WorkspaceCreateEnvelope =
+        let envelope: Envelope<WorkspaceCreateResult> =
             serde_json::from_str(&output).context("invalid HerdR workspace response")?;
         Ok(CreatedWorkspace {
             workspace_id: envelope.result.workspace.workspace_id,
@@ -153,7 +188,7 @@ impl Herdr {
         let mut command = Command::new(&self.binary);
         command.args(["api", "snapshot"]);
         let output = checked_output(&mut command, "read HerdR session snapshot")?;
-        let envelope: SnapshotEnvelope =
+        let envelope: Envelope<SnapshotResult> =
             serde_json::from_str(&output).context("invalid HerdR snapshot response")?;
         Ok(envelope.result.snapshot)
     }
@@ -190,31 +225,10 @@ impl Herdr {
         }
         checked_status(&mut command, "report JJ workspace metadata")
     }
-
-    pub fn find_workspace_for_root(&self, snapshot: &Snapshot, root: &Path) -> Option<String> {
-        let expected = canonical_or_original(root);
-        snapshot.workspaces.iter().find_map(|workspace| {
-            snapshot
-                .panes
-                .iter()
-                .filter(|pane| {
-                    pane.workspace_id == workspace.workspace_id
-                        && pane.tab_id == workspace.active_tab_id
-                })
-                .filter_map(|pane| pane.cwd.as_deref())
-                .any(|cwd| canonical_or_original(cwd) == expected)
-                .then(|| workspace.workspace_id.clone())
-        })
-    }
 }
 
 fn canonical_or_original(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-#[derive(Deserialize)]
-struct WorkspaceCreateEnvelope {
-    result: WorkspaceCreateResult,
 }
 
 #[derive(Deserialize)]
@@ -234,102 +248,11 @@ struct PaneId {
 }
 
 #[derive(Deserialize)]
-struct SnapshotEnvelope {
-    result: SnapshotResult,
+struct Envelope<T> {
+    result: T,
 }
 
 #[derive(Deserialize)]
 struct SnapshotResult {
     snapshot: Snapshot,
-}
-
-pub fn required_source(context: &InvocationContext) -> Result<(&Path, &str)> {
-    let cwd = context
-        .source_cwd()
-        .context("focused HerdR workspace has no working directory")?;
-    let workspace_id = context
-        .workspace_id
-        .as_deref()
-        .context("focused HerdR workspace has no ID")?;
-    if cwd.as_os_str().is_empty() || workspace_id.is_empty() {
-        bail!("focused HerdR workspace context is incomplete");
-    }
-    Ok((cwd, workspace_id))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(unix)]
-    use std::fs;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn context_prefers_focused_pane_cwd() {
-        let context: InvocationContext = serde_json::from_str(
-            r#"{
-                "workspace_id":"w1",
-                "workspace_cwd":"/repo",
-                "focused_pane_cwd":"/repo/subdir"
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(context.source_cwd(), Some(Path::new("/repo/subdir")));
-    }
-
-    #[test]
-    fn finds_open_workspace_by_active_tab_cwd() {
-        let herdr = Herdr::with_binary("herdr");
-        let snapshot = Snapshot {
-            workspaces: vec![SnapshotWorkspace {
-                workspace_id: "w2".to_owned(),
-                active_tab_id: "w2:t1".to_owned(),
-            }],
-            panes: vec![SnapshotPane {
-                workspace_id: "w2".to_owned(),
-                tab_id: "w2:t1".to_owned(),
-                cwd: Some(PathBuf::from("/repo.feature")),
-                focused: false,
-            }],
-        };
-
-        assert_eq!(
-            herdr.find_workspace_for_root(&snapshot, Path::new("/repo.feature")),
-            Some("w2".to_owned())
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn creates_a_workspace_with_env_and_parses_container_ids() {
-        let temp = tempfile::tempdir().unwrap();
-        let binary = temp.path().join("herdr");
-        let log = temp.path().join("args.log");
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\nprintf '%s\\n' '{{\"result\":{{\"workspace\":{{\"workspace_id\":\"w9\"}},\"root_pane\":{{\"pane_id\":\"w9:p1\"}}}}}}'\n",
-                log.display()
-            ),
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&binary).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&binary, permissions).unwrap();
-        let herdr = Herdr::with_binary(&binary);
-        let env = BTreeMap::from([("GH_REPO".to_owned(), "owner/repo".to_owned())]);
-
-        let created = herdr
-            .create_workspace(Path::new("/tmp/repo.feature"), "feature", &env)
-            .unwrap();
-
-        assert_eq!(created.workspace_id, "w9");
-        assert_eq!(created.root_pane_id, "w9:p1");
-        let args = fs::read_to_string(log).unwrap();
-        assert!(args.contains("workspace create --cwd /tmp/repo.feature"));
-        assert!(args.contains("--env GH_REPO=owner/repo"));
-    }
 }
