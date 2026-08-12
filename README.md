@@ -6,6 +6,7 @@ and inspect JJ workspaces without using Git worktrees.
 ## Features
 
 - Create a JJ workspace on top of the exact current `@` change.
+- Replace the generated name by typing a custom workspace name.
 - Toggle bookmark creation in the create popup.
 - Open an existing JJ workspace or focus its existing Herdr workspace.
 - Remove a secondary JJ workspace after one confirmation.
@@ -108,7 +109,6 @@ Add the plugin tokens to the Spaces layout:
 [ui.sidebar.spaces]
 rows = [
   ["state_icon", "workspace"],
-  ["branch", "git_status"],
   ["$jj_change", "$jj_status"],
 ]
 ```

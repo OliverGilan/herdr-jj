@@ -79,10 +79,6 @@ fn create_workspace() -> Result<()> {
     let Some(choice) = create_dialog(CreateDialog {
         initial_name: generated_name(seed()),
         create_bookmark: config.create_bookmark,
-        repository_name: &repository.name,
-        workspace_root: &config.workspace_root,
-        parent_change: &parent.change_id,
-        has_post_create: config.post_create.is_some(),
     })?
     else {
         return Ok(());

@@ -47,8 +47,8 @@ command = ["./target/release/herdr-jj", "refresh"]
 id = "create"
 title = "New JJ workspace"
 placement = "popup"
-width = 78
-height = 16
+width = 58
+height = 10
 command = ["./target/release/herdr-jj", "pane", "create"]
 
 [[panes]]

@@ -1,5 +1,5 @@
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -10,10 +10,10 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 
-use crate::jj::{ChangeStatus, WorkspaceEntry, path_slug, valid_workspace_name};
+use crate::jj::{ChangeStatus, WorkspaceEntry, valid_workspace_name};
 
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
@@ -24,13 +24,9 @@ pub struct CreateChoice {
     pub create_bookmark: bool,
 }
 
-pub struct CreateDialog<'a> {
+pub struct CreateDialog {
     pub initial_name: String,
     pub create_bookmark: bool,
-    pub repository_name: &'a str,
-    pub workspace_root: &'a Path,
-    pub parent_change: &'a str,
-    pub has_post_create: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -51,7 +47,7 @@ pub struct RemoveDialog<'a> {
     pub status: &'a ChangeStatus,
 }
 
-pub fn create_dialog(dialog: CreateDialog<'_>) -> io::Result<Option<CreateChoice>> {
+pub fn create_dialog(dialog: CreateDialog) -> io::Result<Option<CreateChoice>> {
     let mut name = dialog.initial_name.clone();
     let mut bookmark = dialog.create_bookmark;
     let mut replace_on_type = true;
@@ -59,8 +55,7 @@ pub fn create_dialog(dialog: CreateDialog<'_>) -> io::Result<Option<CreateChoice
 
     with_terminal(|terminal| {
         loop {
-            terminal
-                .draw(|frame| draw_create(frame, &dialog, &name, bookmark, error.as_deref()))?;
+            terminal.draw(|frame| draw_create(frame, &name, bookmark, error.as_deref()))?;
             let Event::Key(key) = event::read()? else {
                 continue;
             };
@@ -190,61 +185,40 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
     raw_mode.and(screen)
 }
 
-fn draw_create(
-    frame: &mut Frame,
-    dialog: &CreateDialog<'_>,
-    name: &str,
-    bookmark: bool,
-    error: Option<&str>,
-) {
-    let inner = shell(frame, " New JJ workspace ");
+fn draw_create(frame: &mut Frame, name: &str, bookmark: bool, error: Option<&str>) {
+    let inner = shell(frame);
     let rows = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(2),
-        Constraint::Length(2),
-        Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(1),
     ])
     .split(inner);
-    field(frame, rows[0], "Workspace", &format!("{name}_"), true);
-    let destination = checkout_preview(dialog.workspace_root, dialog.repository_name, name);
-    field(
-        frame,
-        rows[1],
-        "Checkout",
-        &destination.display().to_string(),
-        false,
-    );
-    field(
-        frame,
-        rows[2],
-        "Parent",
-        &format!("@{}", dialog.parent_change),
-        false,
-    );
+    field(frame, rows[0], "Name", &format!("{name}_"), true);
     let mark = if bookmark { "[x]" } else { "[ ]" };
-    let setup = if dialog.has_post_create {
-        "  setup command enabled"
-    } else {
-        ""
-    };
     frame.render_widget(
-        Paragraph::new(format!("Tab toggles bookmark  {mark}{setup}"))
+        Paragraph::new(format!("{mark} Create bookmark with the same name  (Tab)"))
             .style(Style::default().fg(MUTED)),
-        rows[3],
+        rows[1],
     );
     if let Some(error) = error {
         frame.render_widget(
             Paragraph::new(error).style(Style::default().fg(Color::Red)),
-            rows[4],
+            rows[2],
         );
     }
-    footer(frame, rows[5], "Enter create", "Esc cancel");
+    frame.render_widget(
+        Paragraph::new("Type to replace the suggestion with a custom name.")
+            .style(Style::default().fg(MUTED))
+            .alignment(Alignment::Center),
+        rows[3],
+    );
+    footer(frame, rows[4], "Enter create", "Esc cancel");
 }
 
 fn draw_open(frame: &mut Frame, query: &str, entries: &[&OpenEntry], selected: usize) {
-    let inner = shell(frame, " Open JJ workspace ");
+    let inner = shell(frame);
     let rows = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(5),
@@ -300,7 +274,7 @@ fn draw_open(frame: &mut Frame, query: &str, entries: &[&OpenEntry], selected: u
 }
 
 fn draw_remove(frame: &mut Frame, dialog: &RemoveDialog<'_>) {
-    let inner = shell(frame, " Remove JJ workspace ");
+    let inner = shell(frame);
     let rows = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(2),
@@ -346,19 +320,13 @@ fn draw_remove(frame: &mut Frame, dialog: &RemoveDialog<'_>) {
     footer(frame, rows[5], "Enter remove", "Esc cancel");
 }
 
-fn shell(frame: &mut Frame, title: &str) -> Rect {
+fn shell(frame: &mut Frame) -> Rect {
     let area = frame.area();
     frame.render_widget(Clear, area);
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT));
-    let inner = block.inner(area).inner(Margin {
+    area.inner(Margin {
         horizontal: 2,
         vertical: 1,
-    });
-    frame.render_widget(block, area);
-    inner
+    })
 }
 
 fn field(frame: &mut Frame, area: Rect, label: &str, value: &str, active: bool) {
@@ -475,15 +443,13 @@ pub fn generated_name(seed: u64) -> String {
     ];
     let adjective = ADJECTIVES[(seed as usize) % ADJECTIVES.len()];
     let noun = NOUNS[((seed / ADJECTIVES.len() as u64) as usize) % NOUNS.len()];
-    format!("workspace/{adjective}-{noun}-{:04x}", seed & 0xffff)
-}
-
-pub fn checkout_preview(root: &Path, repository: &str, name: &str) -> PathBuf {
-    root.join(repository).join(path_slug(name))
+    format!("{adjective}-{noun}")
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]
@@ -506,14 +472,8 @@ mod tests {
 
     #[test]
     fn generated_names_are_valid() {
-        assert!(valid_workspace_name(&generated_name(42)));
-    }
-
-    #[test]
-    fn checkout_preview_uses_the_same_slug_as_creation() {
-        assert_eq!(
-            checkout_preview(Path::new("/workspaces"), "repo", "feature/api"),
-            PathBuf::from("/workspaces/repo/feature-api")
-        );
+        let name = generated_name(42);
+        assert!(valid_workspace_name(&name));
+        assert_eq!(name.matches('-').count(), 1);
     }
 }
