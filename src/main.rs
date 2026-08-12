@@ -105,15 +105,18 @@ fn create_workspace() -> Result<()> {
     let config = Config::load()?;
     let source = required_env_path(SOURCE_CWD)?;
     let repository = JjRepository::discover(&source)?;
-    let parent = repository.capture_current_commit()?;
     let Some(choice) = create_dialog(config.create_bookmark)? else {
         return Ok(());
     };
 
+    if let Err(error) = repository.fetch_git() {
+        eprintln!("warning: {error:#}; continuing with local trunk()");
+    }
+
     let created = repository.create_workspace(
         &config.workspace_root,
         &choice.name,
-        &parent,
+        "trunk()",
         choice.create_bookmark,
     )?;
     let herdr = Herdr::from_env();

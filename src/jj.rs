@@ -72,7 +72,8 @@ impl JjRepository {
         checked_status(&mut status, "snapshot current JJ workspace")
     }
 
-    pub fn capture_current_commit(&self) -> Result<String> {
+    #[cfg(test)]
+    fn capture_current_commit(&self) -> Result<String> {
         self.snapshot_working_copy()?;
         let mut command = self.read_command(&self.current_root);
         command.args(["log", "--no-graph", "-r", "@", "-T", "commit_id"]);
@@ -81,6 +82,15 @@ impl JjRepository {
             bail!("JJ returned an empty current commit ID");
         }
         Ok(commit)
+    }
+
+    pub fn fetch_git(&self) -> Result<()> {
+        let mut command = Command::new("jj");
+        command
+            .args(["--no-pager", "-R"])
+            .arg(&self.main_root)
+            .args(["git", "fetch"]);
+        checked_status(&mut command, "fetch JJ Git remotes")
     }
 
     pub fn current_workspace_name(&self) -> Result<String> {
@@ -150,7 +160,7 @@ impl JjRepository {
         &self,
         workspace_root: &Path,
         name: &str,
-        parent_commit_id: &str,
+        revision: &str,
         create_bookmark: bool,
     ) -> Result<CreatedJjWorkspace> {
         if !valid_workspace_name(name) {
@@ -177,14 +187,7 @@ impl JjRepository {
         let mut add = Command::new("jj");
         add.args(["--no-pager", "-R"])
             .arg(&self.current_root)
-            .args([
-                "workspace",
-                "add",
-                "--name",
-                name,
-                "--revision",
-                parent_commit_id,
-            ])
+            .args(["workspace", "add", "--name", name, "--revision", revision])
             .arg(&root);
         if let Err(error) = checked_status(&mut add, "create JJ workspace") {
             let _ = fs::remove_dir_all(&root);

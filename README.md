@@ -5,7 +5,7 @@ and inspect JJ workspaces with Herdr spaces.
 
 ## Features
 
-- Create a JJ workspace when opening a new Herdr space.
+- Fetch Git remotes and create a JJ workspace from `trunk()`.
 - Automatic bookmark creation on workspace creation.
 - Open an existing JJ workspace or focus its existing Herdr workspace.
 - Remove a workspace when closing a Herdr space.
@@ -124,10 +124,10 @@ herdr plugin action invoke olivergilan.herdr-jj.refresh-status
 
 ## Lifecycle
 
-Creation snapshots the source workspace, captures its full commit ID, creates a
-new JJ working-copy change on that commit, then opens the checkout in Herdr. If
-Herdr creation fails, the plugin forgets the new JJ workspace and removes only
-the files created by that operation.
+Creation fetches Git remotes, creates a new JJ working-copy change on `trunk()`,
+then opens the checkout in Herdr. If fetching fails, it uses the locally known
+`trunk()`. If Herdr creation fails, the plugin forgets the new JJ workspace and
+removes only the files created by that operation.
 
 After confirmation, removal snapshots the working copy, moves the checkout to a
 temporary sibling path, and forgets the JJ workspace. If `jj workspace forget`
