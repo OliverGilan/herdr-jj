@@ -142,6 +142,13 @@ fails, the plugin moves the checkout back. Existing bookmarks remain unchanged.
 The temporary checkout is deleted in the background so the Herdr workspace can
 close immediately.
 
+A colocated workspace is also a Git worktree. The plugin moves it with
+`git worktree move` and deletes it with `git worktree remove --force`, so Git's
+worktree list stays in sync. If Git refuses, for example for a worktree with
+submodules, the plugin renames and deletes the checkout directly, then runs
+`git worktree prune`. A locked worktree is not removed: unlock it with
+`git worktree unlock` first.
+
 The main JJ workspace cannot be removed through the plugin.
 
 ## Current Herdr Limit

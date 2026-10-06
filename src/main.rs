@@ -1,3 +1,4 @@
+mod git;
 mod herdr;
 mod jj;
 mod process;
@@ -222,8 +223,7 @@ fn cleanup(path: &Path) -> Result<()> {
             path.display()
         );
     }
-    fs::remove_dir_all(path)
-        .with_context(|| format!("could not delete staged checkout {}", path.display()))
+    git::remove_checkout(path)
 }
 
 fn spawn_cleanup(path: &Path) -> Result<()> {
