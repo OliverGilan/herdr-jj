@@ -677,6 +677,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn creates_and_rolls_back_a_workspace_in_a_colocated_repository() {
+        let fixture = JjFixture::colocated();
+        let repository = JjRepository::discover(&fixture.main).unwrap();
+        let parent = repository.capture_current_commit().unwrap();
+
+        let created = repository
+            .create_workspace(&fixture.workspaces, "colocated", &parent, false)
+            .unwrap();
+
+        let child = JjRepository::discover(&created.root).unwrap();
+        assert_eq!(child.main_root, repository.main_root);
+        assert_eq!(child.current_workspace_name().unwrap(), "colocated");
+        assert_eq!(
+            created.root.join(".git").is_file(),
+            fixture.jj_creates_git_worktrees()
+        );
+
+        repository.rollback_workspace(&created).unwrap();
+        assert!(!created.root.exists());
+        assert_eq!(fixture.git_worktrees(), vec![fixture.main.clone()]);
+    }
+
     struct JjFixture {
         temp: TempDir,
         main: PathBuf,
@@ -685,19 +708,28 @@ mod tests {
 
     impl JjFixture {
         fn new() -> Self {
+            Self::init("--no-colocate")
+        }
+
+        fn colocated() -> Self {
+            Self::init("--colocate")
+        }
+
+        fn init(colocation: &str) -> Self {
             let temp = tempfile::tempdir().unwrap();
             let config = temp.path().join("config");
             fs::create_dir(&config).unwrap();
             fs::write(config.join("jj.toml"), "").unwrap();
             fs::write(config.join("git"), "").unwrap();
+            let root = fs::canonicalize(temp.path()).unwrap();
             let fixture = Self {
-                main: temp.path().join("repo"),
-                workspaces: temp.path().join("workspaces"),
+                main: root.join("repo"),
+                workspaces: root.join("workspaces"),
                 temp,
             };
             let status = fixture
                 .command("jj")
-                .args(["git", "init", "--no-colocate"])
+                .args(["git", "init", colocation])
                 .arg(&fixture.main)
                 .status()
                 .unwrap();
@@ -765,6 +797,46 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
             String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        }
+
+        /// Since Jujutsu 0.46.0, which added `jj workspace add --colocate`, a
+        /// workspace added from a colocated workspace gets a Git worktree when
+        /// `git.colocate` is true.
+        fn jj_creates_git_worktrees(&self) -> bool {
+            let help = self
+                .command("jj")
+                .args(["workspace", "add", "--help"])
+                .output()
+                .unwrap();
+            let colocate = self
+                .command("jj")
+                .args(["--no-pager", "--ignore-working-copy", "-R"])
+                .arg(&self.main)
+                .args(["config", "get", "git.colocate"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&help.stdout).contains("--colocate")
+                && String::from_utf8_lossy(&colocate.stdout).trim() == "true"
+        }
+
+        fn git_worktrees(&self) -> Vec<PathBuf> {
+            let output = self
+                .command("git")
+                .arg("-C")
+                .arg(&self.main)
+                .args(["worktree", "list", "--porcelain"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .map(PathBuf::from)
+                .collect()
         }
     }
 }
