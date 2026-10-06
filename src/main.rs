@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 
-use crate::herdr::{Herdr, InvocationContext};
+use crate::herdr::{CreatedWorkspace, Herdr, InvocationContext};
 use crate::jj::JjRepository;
 use crate::ui::{OpenItem, create_dialog, open_dialog, remove_dialog};
 
@@ -120,20 +120,19 @@ fn create_workspace() -> Result<()> {
         choice.create_bookmark,
     )?;
     let herdr = Herdr::from_env();
-    let herdr_workspace =
-        match herdr.create_workspace(&created.root, &created.name, &repository.workspace_env()) {
-            Ok(workspace) => workspace,
-            Err(error) => {
-                let rollback = repository.rollback_workspace(&created);
-                return match rollback {
-                    Ok(()) => Err(error.context("JJ workspace was rolled back")),
-                    Err(rollback) => Err(error.context(format!(
-                        "JJ rollback also failed: {rollback:#}; checkout remains at {}",
-                        created.root.display()
-                    ))),
-                };
-            }
-        };
+    let herdr_workspace = match open_in_herdr(&herdr, &repository, &created.root, &created.name) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            let rollback = repository.rollback_workspace(&created);
+            return match rollback {
+                Ok(()) => Err(error.context("JJ workspace was rolled back")),
+                Err(rollback) => Err(error.context(format!(
+                    "JJ rollback also failed: {rollback:#}; checkout remains at {}",
+                    created.root.display()
+                ))),
+            };
+        }
+    };
 
     if let Some(command) = config.post_create.as_deref() {
         herdr
@@ -177,13 +176,22 @@ fn open_workspace() -> Result<()> {
     if let Some(workspace_id) = entries[selected].open_workspace_id.as_deref() {
         herdr.focus_workspace(workspace_id)
     } else {
-        herdr
-            .create_workspace(
-                &workspace.root,
-                &workspace.name,
-                &repository.workspace_env(),
-            )
-            .map(|_| ())
+        open_in_herdr(&herdr, &repository, &workspace.root, &workspace.name).map(|_| ())
+    }
+}
+
+/// Open a colocated workspace as a Herdr worktree so that it is grouped with
+/// the main workspace. Other workspaces open as standalone Herdr workspaces.
+fn open_in_herdr(
+    herdr: &Herdr,
+    repository: &JjRepository,
+    root: &Path,
+    label: &str,
+) -> Result<CreatedWorkspace> {
+    if repository.is_colocated_workspace(root) {
+        herdr.open_worktree(&repository.main_root, root, label)
+    } else {
+        herdr.create_workspace(root, label, &repository.workspace_env())
     }
 }
 
