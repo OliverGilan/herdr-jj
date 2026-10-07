@@ -111,6 +111,7 @@ rows = [
 `$jj_change` shows local bookmarks or the short change ID. `$jj_status` uses:
 
 - `!` for a conflict
+- `?` for a bookmark that tracks no remote, such as one never pushed
 - `+N` and `-N` for distance from the bookmark's tracked remote, taking the
   largest when it tracks more than one
 - `*N` for changed files in `@`

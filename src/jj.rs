@@ -334,15 +334,16 @@ impl JjRepository {
             bail!("JJ returned incomplete change status");
         }
 
-        let (ahead, behind) = bookmarks
+        let distances = bookmarks
             .first()
-            .and_then(|name| self.remote_distances(root, name).ok())
-            .map(|distances| {
-                distances.iter().fold((0, 0), |(ahead, behind), distance| {
-                    (ahead.max(distance.ahead), behind.max(distance.behind))
-                })
-            })
-            .unwrap_or_default();
+            .and_then(|name| self.remote_distances(root, name).ok());
+        let unpushed = distances.as_ref().is_some_and(Vec::is_empty);
+        let (ahead, behind) = distances
+            .iter()
+            .flatten()
+            .fold((0, 0), |(ahead, behind), distance| {
+                (ahead.max(distance.ahead), behind.max(distance.behind))
+            });
 
         let change = if bookmarks.is_empty() {
             format!("@{change_id}")
@@ -352,6 +353,9 @@ impl JjRepository {
         let mut values = Vec::new();
         if conflicted {
             values.push("!".to_owned());
+        }
+        if unpushed {
+            values.push("?".to_owned());
         }
         if ahead > 0 || behind > 0 {
             let mut distance = String::new();
@@ -635,10 +639,13 @@ mod tests {
         let repository = JjRepository::discover(&fixture.main).unwrap();
         fs::write(fixture.main.join("first.txt"), "first\n").unwrap();
         fixture.jj(&["describe", "-m", "first"]);
-        fixture.jj(&["bookmark", "create", "feat", "-r", "@"]);
-        fixture.push("origin", "feat");
         let status = || repository.sidebar_tokens(&fixture.main).unwrap().status;
+        assert_eq!(status(), "*1");
 
+        fixture.jj(&["bookmark", "create", "feat", "-r", "@"]);
+        assert_eq!(status(), "? *1");
+
+        fixture.push("origin", "feat");
         assert_eq!(status(), "*1");
 
         fixture.jj(&["new", "-m", "second"]);
