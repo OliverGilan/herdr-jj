@@ -6,6 +6,3 @@ create_bookmark = false
 
 # Herdr submits this command in the new workspace's root pane after creation.
 # post_create = "mise install && npm install"
-
-# Used to calculate bookmark distance in the sidebar.
-status_remote = "origin"

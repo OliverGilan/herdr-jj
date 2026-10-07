@@ -20,7 +20,6 @@ const STATUS_TEMPLATE: &str = concat!(
 // how far the local bookmark is ahead of and behind each remote.
 const TRACKING_TEMPLATE: &str = concat!(
     "if(self.remote() && self.remote() != \"git\", ",
-    "self.remote() ++ \"\\x1f\" ++ ",
     "self.tracking_behind_count().lower() ++ \"\\x1f\" ++ ",
     "self.tracking_ahead_count().lower() ++ \"\\n\")"
 );
@@ -37,7 +36,6 @@ pub struct SidebarTokens {
 }
 
 struct RemoteDistance {
-    remote: String,
     ahead: usize,
     behind: usize,
 }
@@ -306,7 +304,7 @@ impl JjRepository {
         Ok(tombstone)
     }
 
-    pub fn sidebar_tokens(&self, root: &Path, remote: &str) -> Result<SidebarTokens> {
+    pub fn sidebar_tokens(&self, root: &Path) -> Result<SidebarTokens> {
         let mut command = self.read_command(root);
         command.args([
             "log",
@@ -339,12 +337,11 @@ impl JjRepository {
         let (ahead, behind) = bookmarks
             .first()
             .and_then(|name| self.remote_distances(root, name).ok())
-            .and_then(|distances| {
-                distances
-                    .into_iter()
-                    .find(|distance| distance.remote == remote)
+            .map(|distances| {
+                distances.iter().fold((0, 0), |(ahead, behind), distance| {
+                    (ahead.max(distance.ahead), behind.max(distance.behind))
+                })
             })
-            .map(|distance| (distance.ahead, distance.behind))
             .unwrap_or_default();
 
         let change = if bookmarks.is_empty() {
@@ -410,18 +407,11 @@ impl JjRepository {
             .lines()
             .filter(|line| !line.is_empty())
             .map(|line| {
-                let mut fields = line.splitn(3, '\x1f');
-                let remote = fields.next().unwrap_or_default().to_owned();
-                let ahead = fields.next().unwrap_or_default().parse::<usize>();
-                let behind = fields.next().unwrap_or_default().parse::<usize>();
-                match (ahead, behind) {
-                    (Ok(ahead), Ok(behind)) if !remote.is_empty() => Ok(RemoteDistance {
-                        remote,
-                        ahead,
-                        behind,
-                    }),
-                    _ => bail!("JJ returned incomplete bookmark tracking: {line}"),
-                }
+                let (ahead, behind) = line
+                    .split_once('\x1f')
+                    .and_then(|(ahead, behind)| Some((ahead.parse().ok()?, behind.parse().ok()?)))
+                    .with_context(|| format!("JJ returned incomplete bookmark tracking: {line}"))?;
+                Ok(RemoteDistance { ahead, behind })
             })
             .collect()
     }
@@ -639,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_reports_distance_from_the_status_remote() {
+    fn sidebar_reports_distance_from_the_tracked_remote() {
         let fixture = JjFixture::new();
         fixture.add_remote("origin");
         let repository = JjRepository::discover(&fixture.main).unwrap();
@@ -647,24 +637,37 @@ mod tests {
         fixture.jj(&["describe", "-m", "first"]);
         fixture.jj(&["bookmark", "create", "feat", "-r", "@"]);
         fixture.push("origin", "feat");
-        let status = |remote| {
-            repository
-                .sidebar_tokens(&fixture.main, remote)
-                .unwrap()
-                .status
-        };
+        let status = || repository.sidebar_tokens(&fixture.main).unwrap().status;
 
-        assert_eq!(status("origin"), "*1");
+        assert_eq!(status(), "*1");
 
         fixture.jj(&["new", "-m", "second"]);
         fs::write(fixture.main.join("second.txt"), "second\n").unwrap();
         fixture.jj(&["bookmark", "set", "feat", "-r", "@"]);
-        assert_eq!(status("origin"), "+1 *1");
+        assert_eq!(status(), "+1 *1");
 
         fixture.push("origin", "feat");
         fixture.jj(&["edit", "@-"]);
         fixture.jj(&["bookmark", "set", "feat", "-r", "@", "--allow-backwards"]);
-        assert_eq!(status("origin"), "-1 *1");
+        assert_eq!(status(), "-1 *1");
+    }
+
+    #[test]
+    fn sidebar_uses_a_remote_other_than_origin() {
+        let fixture = JjFixture::new();
+        fixture.add_remote("origin");
+        fixture.add_remote("fork");
+        let repository = JjRepository::discover(&fixture.main).unwrap();
+        fixture.jj(&["describe", "-m", "first"]);
+        fixture.jj(&["bookmark", "create", "feat", "-r", "@"]);
+        fixture.push("fork", "feat");
+        fixture.jj(&["new", "-m", "second"]);
+        fixture.jj(&["bookmark", "set", "feat", "-r", "@"]);
+
+        assert_eq!(
+            repository.sidebar_tokens(&fixture.main).unwrap().status,
+            "+1"
+        );
     }
 
     struct JjFixture {
