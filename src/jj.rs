@@ -16,6 +16,15 @@ const STATUS_TEMPLATE: &str = concat!(
     "local_bookmarks.map(|b| b.name()).join(\" \" ) ++ \"\\n\""
 );
 
+// JJ counts tracking distance from the remote ref's side, so swap them to get
+// how far the local bookmark is ahead of and behind each remote.
+const TRACKING_TEMPLATE: &str = concat!(
+    "if(self.remote() && self.remote() != \"git\", ",
+    "self.remote() ++ \"\\x1f\" ++ ",
+    "self.tracking_behind_count().lower() ++ \"\\x1f\" ++ ",
+    "self.tracking_ahead_count().lower() ++ \"\\n\")"
+);
+
 pub struct JjRepository {
     pub current_root: PathBuf,
     pub main_root: PathBuf,
@@ -25,6 +34,12 @@ pub struct JjRepository {
 pub struct SidebarTokens {
     pub change: String,
     pub status: String,
+}
+
+struct RemoteDistance {
+    remote: String,
+    ahead: usize,
+    behind: usize,
 }
 
 pub struct WorkspaceEntry {
@@ -323,12 +338,13 @@ impl JjRepository {
 
         let (ahead, behind) = bookmarks
             .first()
-            .filter(|name| valid_remote_ref(name) && valid_remote_ref(remote))
-            .map(|name| {
-                let ahead = self.revset_count(root, &format!("{name}@{remote}..{name}"));
-                let behind = self.revset_count(root, &format!("{name}..{name}@{remote}"));
-                (ahead.unwrap_or_default(), behind.unwrap_or_default())
+            .and_then(|name| self.remote_distances(root, name).ok())
+            .and_then(|distances| {
+                distances
+                    .into_iter()
+                    .find(|distance| distance.remote == remote)
             })
+            .map(|distance| (distance.ahead, distance.behind))
             .unwrap_or_default();
 
         let change = if bookmarks.is_empty() {
@@ -378,13 +394,36 @@ impl JjRepository {
         github_slug(origin)
     }
 
-    fn revset_count(&self, root: &Path, revset: &str) -> Option<usize> {
+    fn remote_distances(&self, root: &Path, bookmark: &str) -> Result<Vec<RemoteDistance>> {
         let mut command = self.read_command(root);
-        command.args(["log", "--count", "--revisions", revset]);
-        checked_output(&mut command, "count JJ revisions")
-            .ok()?
-            .parse()
-            .ok()
+        command
+            .args([
+                "bookmark",
+                "list",
+                "--tracked",
+                "--template",
+                TRACKING_TEMPLATE,
+            ])
+            .arg(format!("exact:{bookmark}"));
+        let output = checked_output(&mut command, "read JJ bookmark tracking")?;
+        output
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let mut fields = line.splitn(3, '\x1f');
+                let remote = fields.next().unwrap_or_default().to_owned();
+                let ahead = fields.next().unwrap_or_default().parse::<usize>();
+                let behind = fields.next().unwrap_or_default().parse::<usize>();
+                match (ahead, behind) {
+                    (Ok(ahead), Ok(behind)) if !remote.is_empty() => Ok(RemoteDistance {
+                        remote,
+                        ahead,
+                        behind,
+                    }),
+                    _ => bail!("JJ returned incomplete bookmark tracking: {line}"),
+                }
+            })
+            .collect()
     }
 
     fn read_command(&self, root: &Path) -> Command {
@@ -465,13 +504,6 @@ fn removal_tombstone(root: &Path) -> Result<PathBuf> {
         ".{name}.herdr-jj-removing-{}-{nonce}",
         std::process::id()
     )))
-}
-
-fn valid_remote_ref(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "._-/".contains(character))
 }
 
 fn github_slug(url: &str) -> Option<String> {
@@ -606,6 +638,35 @@ mod tests {
         assert!(fixture.main.exists());
     }
 
+    #[test]
+    fn sidebar_reports_distance_from_the_status_remote() {
+        let fixture = JjFixture::new();
+        fixture.add_remote("origin");
+        let repository = JjRepository::discover(&fixture.main).unwrap();
+        fs::write(fixture.main.join("first.txt"), "first\n").unwrap();
+        fixture.jj(&["describe", "-m", "first"]);
+        fixture.jj(&["bookmark", "create", "feat", "-r", "@"]);
+        fixture.push("origin", "feat");
+        let status = |remote| {
+            repository
+                .sidebar_tokens(&fixture.main, remote)
+                .unwrap()
+                .status
+        };
+
+        assert_eq!(status("origin"), "*1");
+
+        fixture.jj(&["new", "-m", "second"]);
+        fs::write(fixture.main.join("second.txt"), "second\n").unwrap();
+        fixture.jj(&["bookmark", "set", "feat", "-r", "@"]);
+        assert_eq!(status("origin"), "+1 *1");
+
+        fixture.push("origin", "feat");
+        fixture.jj(&["edit", "@-"]);
+        fixture.jj(&["bookmark", "set", "feat", "-r", "@", "--allow-backwards"]);
+        assert_eq!(status("origin"), "-1 *1");
+    }
+
     struct JjFixture {
         temp: TempDir,
         main: PathBuf,
@@ -647,6 +708,37 @@ mod tests {
                 .env_remove("GIT_WORK_TREE")
                 .env_remove("GIT_INDEX_FILE");
             command
+        }
+
+        fn add_remote(&self, name: &str) {
+            let remote = self.temp.path().join(format!("{name}.git"));
+            let status = self
+                .command("git")
+                .args(["init", "--quiet", "--bare"])
+                .arg(&remote)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            self.jj(&["git", "remote", "add", name, remote.to_str().unwrap()]);
+        }
+
+        fn jj(&self, args: &[&str]) {
+            let output = self
+                .command("jj")
+                .args(["--no-pager", "-R"])
+                .arg(&self.main)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "jj failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        fn push(&self, remote: &str, bookmark: &str) {
+            self.jj(&["git", "push", "--remote", remote, "--bookmark", bookmark]);
         }
 
         fn jj_output(&self, root: &Path, args: &[&str]) -> String {
