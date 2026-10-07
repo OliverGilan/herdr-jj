@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(child.main_root, repository.main_root);
         assert_eq!(child.current_workspace_name().unwrap(), "feature/api");
         assert_eq!(
-            jj_output(
+            fixture.jj_output(
                 &created.root,
                 &["log", "-r", "@-", "--no-graph", "-T", "commit_id"]
             ),
@@ -540,10 +540,14 @@ mod tests {
             .create_workspace(&fixture.workspaces, "feature-bookmark", &parent, true)
             .unwrap();
 
-        assert!(!jj_output(&created.root, &["bookmark", "list", "feature-bookmark"]).is_empty());
+        assert!(
+            !fixture
+                .jj_output(&created.root, &["bookmark", "list", "feature-bookmark"])
+                .is_empty()
+        );
 
         repository.rollback_workspace(&created).unwrap();
-        let bookmarks = jj_output(&fixture.main, &["bookmark", "list", "feature-bookmark"]);
+        let bookmarks = fixture.jj_output(&fixture.main, &["bookmark", "list", "feature-bookmark"]);
         assert!(bookmarks.is_empty());
     }
 
@@ -573,7 +577,7 @@ mod tests {
                 .all(|workspace| workspace.name != "throwaway")
         );
         assert_eq!(
-            jj_output(
+            fixture.jj_output(
                 &fixture.main,
                 &[
                     "log",
@@ -603,7 +607,7 @@ mod tests {
     }
 
     struct JjFixture {
-        _temp: TempDir,
+        temp: TempDir,
         main: PathBuf,
         workspaces: PathBuf,
     }
@@ -611,33 +615,54 @@ mod tests {
     impl JjFixture {
         fn new() -> Self {
             let temp = tempfile::tempdir().unwrap();
-            let main = temp.path().join("repo");
-            let status = Command::new("jj")
+            let config = temp.path().join("config");
+            fs::create_dir(&config).unwrap();
+            fs::write(config.join("jj.toml"), "").unwrap();
+            fs::write(config.join("git"), "").unwrap();
+            let fixture = Self {
+                main: temp.path().join("repo"),
+                workspaces: temp.path().join("workspaces"),
+                temp,
+            };
+            let status = fixture
+                .command("jj")
                 .args(["git", "init", "--no-colocate"])
-                .arg(&main)
+                .arg(&fixture.main)
                 .status()
                 .unwrap();
             assert!(status.success());
-            Self {
-                workspaces: temp.path().join("workspaces"),
-                _temp: temp,
-                main,
-            }
+            fixture
         }
-    }
 
-    fn jj_output(root: &Path, args: &[&str]) -> String {
-        let output = Command::new("jj")
-            .args(["--no-pager", "--ignore-working-copy", "-R"])
-            .arg(root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "jj failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        fn command(&self, program: &str) -> Command {
+            let config = self.temp.path().join("config");
+            let mut command = Command::new(program);
+            command
+                .env("JJ_CONFIG", config.join("jj.toml"))
+                .env("JJ_USER", "Test User")
+                .env("JJ_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", config.join("git"))
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE");
+            command
+        }
+
+        fn jj_output(&self, root: &Path, args: &[&str]) -> String {
+            let output = self
+                .command("jj")
+                .args(["--no-pager", "--ignore-working-copy", "-R"])
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "jj failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        }
     }
 }
