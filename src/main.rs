@@ -12,6 +12,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 
 use crate::herdr::{Herdr, InvocationContext};
 use crate::jj::JjRepository;
@@ -73,7 +74,6 @@ fn pane(name: &str) -> Result<()> {
 }
 
 fn refresh_status() -> Result<()> {
-    let config = Config::load()?;
     let herdr = Herdr::from_env();
     let event = env::var("HERDR_PLUGIN_EVENT").unwrap_or_default();
 
@@ -82,7 +82,7 @@ fn refresh_status() -> Result<()> {
         && let (Some(workspace_id), Some(cwd)) =
             (context.workspace_id.as_deref(), context.source_cwd())
     {
-        return report_one(&herdr, workspace_id, cwd, &config.status_remote);
+        return report_one(&herdr, workspace_id, cwd);
     }
 
     let snapshot = herdr.snapshot()?;
@@ -90,8 +90,7 @@ fn refresh_status() -> Result<()> {
         let Some(cwd) = snapshot.cwd_for_workspace(workspace) else {
             continue;
         };
-        if let Err(error) = report_one(&herdr, &workspace.workspace_id, cwd, &config.status_remote)
-        {
+        if let Err(error) = report_one(&herdr, &workspace.workspace_id, cwd) {
             eprintln!(
                 "warning: could not refresh {}: {error:#}",
                 workspace.workspace_id
@@ -247,9 +246,8 @@ fn spawn_cleanup(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn report_one(herdr: &Herdr, workspace_id: &str, cwd: &Path, remote: &str) -> Result<()> {
-    let tokens =
-        JjRepository::discover(cwd).and_then(|repository| repository.sidebar_tokens(cwd, remote));
+fn report_one(herdr: &Herdr, workspace_id: &str, cwd: &Path) -> Result<()> {
+    let tokens = JjRepository::discover(cwd).and_then(|repository| repository.sidebar_tokens(cwd));
     match tokens {
         Ok(tokens) => herdr.report_status(workspace_id, Some(&tokens.change), Some(&tokens.status)),
         Err(_) => herdr.report_status(workspace_id, None, None),
@@ -272,8 +270,10 @@ struct Config {
     create_bookmark: bool,
     #[serde(default, deserialize_with = "empty_is_none")]
     post_create: Option<String>,
-    #[serde(default = "default_remote")]
-    status_remote: String,
+    // Retired: JJ knows each bookmark's tracked remote. Still accepted so
+    // existing configs keep loading.
+    #[serde(default, rename = "status_remote")]
+    _status_remote: IgnoredAny,
 }
 
 impl Config {
@@ -291,10 +291,6 @@ impl Config {
             _ => Self::default(),
         };
         config.workspace_root = expand_tilde(config.workspace_root);
-        config.status_remote = config.status_remote.trim().to_owned();
-        if config.status_remote.is_empty() {
-            config.status_remote = default_remote();
-        }
         if !config.workspace_root.is_absolute() {
             anyhow::bail!(
                 "workspace_root must be an absolute path or start with '~/': {}",
@@ -311,17 +307,13 @@ impl Default for Config {
             workspace_root: default_workspace_root(),
             create_bookmark: false,
             post_create: None,
-            status_remote: default_remote(),
+            _status_remote: IgnoredAny,
         }
     }
 }
 
 fn default_workspace_root() -> PathBuf {
     PathBuf::from("~/.herdr/jj-workspaces")
-}
-
-fn default_remote() -> String {
-    "origin".to_owned()
 }
 
 fn empty_is_none<'de, D: serde::Deserializer<'de>>(
@@ -341,5 +333,17 @@ fn expand_tilde(path: PathBuf) -> PathBuf {
     match (path.strip_prefix("~/"), env::var_os("HOME")) {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => PathBuf::from(path),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_still_accepts_the_retired_status_remote() {
+        let config: Config = toml::from_str("status_remote = \"upstream\"\n").unwrap();
+
+        assert_eq!(config.workspace_root, default_workspace_root());
     }
 }

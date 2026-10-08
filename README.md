@@ -84,7 +84,6 @@ Create `config.toml` in that directory. Every field is optional:
 workspace_root = "~/.herdr/jj-workspaces"
 create_bookmark = false
 post_create = "mise install && npm install"
-status_remote = "origin"
 ```
 
 `workspace_root` must be absolute or start with `~/`. New checkouts use this
@@ -112,7 +111,9 @@ rows = [
 `$jj_change` shows local bookmarks or the short change ID. `$jj_status` uses:
 
 - `!` for a conflict
-- `+N` and `-N` for remote distance
+- `?` for a bookmark that tracks no remote, such as one never pushed
+- `+N` and `-N` for distance from the bookmark's tracked remote, taking the
+  largest when it tracks more than one
 - `*N` for changed files in `@`
 
 Status refreshes at startup, when a workspace opens, and when focus changes.
