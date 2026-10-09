@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
+use crate::git;
 use crate::process::{checked_output, checked_output_raw, checked_status};
 
 const STATUS_TEMPLATE: &str = concat!(
@@ -274,16 +275,38 @@ impl JjRepository {
                 self.current_root.display()
             );
         }
+        // A lock asks Git to keep the worktree's entry. Deleting the checkout
+        // anyway would leave an entry that Git never prunes, and that blocks a
+        // new workspace at the same path.
+        let colocated = self.is_colocated_workspace(&self.current_root);
+        if colocated && let Some(reason) = git::lock_reason(&self.current_root) {
+            let reason = if reason.is_empty() {
+                String::new()
+            } else {
+                format!(" ({reason})")
+            };
+            bail!(
+                "refusing to remove a locked Git worktree{reason}; run `git worktree unlock {}` first",
+                self.current_root.display()
+            );
+        }
 
         self.snapshot_working_copy()?;
 
         let tombstone = removal_tombstone(&self.current_root)?;
-        fs::rename(&self.current_root, &tombstone).with_context(|| {
-            format!(
-                "could not stage {} for removal",
-                self.current_root.display()
-            )
-        })?;
+        // Git refuses to move some worktrees, such as ones with submodules.
+        // Those are renamed directly and their stale Git entry is pruned on
+        // cleanup.
+        let moved_by_git =
+            colocated && git::move_worktree(&self.main_root, &self.current_root, &tombstone);
+        if !moved_by_git {
+            fs::rename(&self.current_root, &tombstone).with_context(|| {
+                format!(
+                    "could not stage {} for removal",
+                    self.current_root.display()
+                )
+            })?;
+        }
 
         let mut forget = Command::new("jj");
         forget
@@ -291,7 +314,13 @@ impl JjRepository {
             .arg(&self.main_root)
             .args(["workspace", "forget", workspace_name]);
         if let Err(error) = checked_status(&mut forget, "forget JJ workspace") {
-            let restore = fs::rename(&tombstone, &self.current_root);
+            let restore = if moved_by_git
+                && git::move_worktree(&self.main_root, &tombstone, &self.current_root)
+            {
+                Ok(())
+            } else {
+                fs::rename(&tombstone, &self.current_root)
+            };
             return match restore {
                 Ok(()) => Err(error),
                 Err(restore) => Err(error.context(format!(
@@ -302,6 +331,15 @@ impl JjRepository {
         }
 
         Ok(tombstone)
+    }
+
+    /// A workspace created by `jj workspace add` in a colocated repository is
+    /// also a linked Git worktree: it has a `.git` file pointing into the
+    /// main workspace's `.git` directory.
+    pub fn is_colocated_workspace(&self, root: &Path) -> bool {
+        root != self.main_root
+            && root.join(".git").is_file()
+            && self.main_root.join(".git").is_dir()
     }
 
     pub fn sidebar_tokens(&self, root: &Path) -> Result<SidebarTokens> {
@@ -677,6 +715,164 @@ mod tests {
         );
     }
 
+    #[test]
+    fn creates_and_rolls_back_a_workspace_in_a_colocated_repository() {
+        let fixture = JjFixture::colocated();
+        let repository = JjRepository::discover(&fixture.main).unwrap();
+        let parent = repository.capture_current_commit().unwrap();
+
+        let created = repository
+            .create_workspace(&fixture.workspaces, "colocated", &parent, false)
+            .unwrap();
+
+        let child = JjRepository::discover(&created.root).unwrap();
+        assert_eq!(child.main_root, repository.main_root);
+        assert_eq!(child.current_workspace_name().unwrap(), "colocated");
+        assert_eq!(
+            created.root.join(".git").is_file(),
+            fixture.jj_creates_git_worktrees()
+        );
+
+        repository.rollback_workspace(&created).unwrap();
+        assert!(!created.root.exists());
+        assert_eq!(fixture.git_worktrees(), vec![fixture.main.clone()]);
+    }
+
+    #[test]
+    fn detects_colocated_workspaces() {
+        let plain = JjFixture::new();
+        let repository = JjRepository::discover(&plain.main).unwrap();
+        let parent = repository.capture_current_commit().unwrap();
+        let created = repository
+            .create_workspace(&plain.workspaces, "plain", &parent, false)
+            .unwrap();
+        assert!(!repository.is_colocated_workspace(&plain.main));
+        assert!(!repository.is_colocated_workspace(&created.root));
+
+        let colocated = JjFixture::colocated();
+        let repository = JjRepository::discover(&colocated.main).unwrap();
+        let parent = repository.capture_current_commit().unwrap();
+        let created = repository
+            .create_workspace(&colocated.workspaces, "linked", &parent, false)
+            .unwrap();
+        assert!(!repository.is_colocated_workspace(&colocated.main));
+        assert_eq!(
+            repository.is_colocated_workspace(&created.root),
+            colocated.jj_creates_git_worktrees()
+        );
+    }
+
+    #[test]
+    fn removes_a_colocated_workspace_together_with_its_git_worktree() {
+        let fixture = JjFixture::colocated();
+        if !fixture.jj_creates_git_worktrees() {
+            eprintln!("skipped: this JJ does not create Git worktrees");
+            return;
+        }
+        let repository = JjRepository::discover(&fixture.main).unwrap();
+        let parent = repository.capture_current_commit().unwrap();
+        let created = repository
+            .create_workspace(&fixture.workspaces, "linked", &parent, false)
+            .unwrap();
+        fs::write(created.root.join("changed.txt"), "recoverable in JJ\n").unwrap();
+        let child = JjRepository::discover(&created.root).unwrap();
+        let removed_change = child.capture_current_commit().unwrap();
+
+        let staged = child.stage_current_workspace_removal("linked").unwrap();
+
+        assert!(!created.root.exists());
+        assert_eq!(
+            fixture.git_worktrees(),
+            vec![fixture.main.clone(), staged.clone()]
+        );
+        assert!(
+            repository
+                .list_workspaces()
+                .unwrap()
+                .iter()
+                .all(|workspace| workspace.name != "linked")
+        );
+        assert_eq!(
+            fixture.jj_output(
+                &fixture.main,
+                &[
+                    "log",
+                    "-r",
+                    &removed_change,
+                    "--no-graph",
+                    "-T",
+                    "commit_id"
+                ]
+            ),
+            removed_change
+        );
+
+        git::remove_checkout(&staged).unwrap();
+        assert!(!staged.exists());
+        assert_eq!(fixture.git_worktrees(), vec![fixture.main.clone()]);
+    }
+
+    #[test]
+    fn refuses_to_remove_a_locked_colocated_workspace() {
+        let fixture = JjFixture::colocated();
+        if !fixture.jj_creates_git_worktrees() {
+            eprintln!("skipped: this JJ does not create Git worktrees");
+            return;
+        }
+        let repository = JjRepository::discover(&fixture.main).unwrap();
+        let parent = repository.capture_current_commit().unwrap();
+        let created = repository
+            .create_workspace(&fixture.workspaces, "locked", &parent, false)
+            .unwrap();
+        let lock = fixture
+            .command("git")
+            .arg("-C")
+            .arg(&fixture.main)
+            .args(["worktree", "lock", "--reason", "on a USB drive"])
+            .arg(&created.root)
+            .status()
+            .unwrap();
+        assert!(lock.success());
+        let child = JjRepository::discover(&created.root).unwrap();
+
+        let error = child.stage_current_workspace_removal("locked").unwrap_err();
+
+        assert!(format!("{error:#}").contains("locked Git worktree (on a USB drive)"));
+        assert!(created.root.exists());
+        assert!(
+            repository
+                .list_workspaces()
+                .unwrap()
+                .iter()
+                .any(|workspace| workspace.name == "locked")
+        );
+        assert_eq!(
+            fixture.git_worktrees(),
+            vec![fixture.main.clone(), created.root.clone()]
+        );
+    }
+
+    #[test]
+    fn prunes_the_git_worktree_of_a_checkout_renamed_without_git() {
+        let fixture = JjFixture::colocated();
+        if !fixture.jj_creates_git_worktrees() {
+            eprintln!("skipped: this JJ does not create Git worktrees");
+            return;
+        }
+        let repository = JjRepository::discover(&fixture.main).unwrap();
+        let parent = repository.capture_current_commit().unwrap();
+        let created = repository
+            .create_workspace(&fixture.workspaces, "renamed", &parent, false)
+            .unwrap();
+        let staged = removal_tombstone(&created.root).unwrap();
+        fs::rename(&created.root, &staged).unwrap();
+
+        git::remove_checkout(&staged).unwrap();
+
+        assert!(!staged.exists());
+        assert_eq!(fixture.git_worktrees(), vec![fixture.main.clone()]);
+    }
+
     struct JjFixture {
         temp: TempDir,
         main: PathBuf,
@@ -685,19 +881,28 @@ mod tests {
 
     impl JjFixture {
         fn new() -> Self {
+            Self::init("--no-colocate")
+        }
+
+        fn colocated() -> Self {
+            Self::init("--colocate")
+        }
+
+        fn init(colocation: &str) -> Self {
             let temp = tempfile::tempdir().unwrap();
             let config = temp.path().join("config");
             fs::create_dir(&config).unwrap();
             fs::write(config.join("jj.toml"), "").unwrap();
             fs::write(config.join("git"), "").unwrap();
+            let root = fs::canonicalize(temp.path()).unwrap();
             let fixture = Self {
-                main: temp.path().join("repo"),
-                workspaces: temp.path().join("workspaces"),
+                main: root.join("repo"),
+                workspaces: root.join("workspaces"),
                 temp,
             };
             let status = fixture
                 .command("jj")
-                .args(["git", "init", "--no-colocate"])
+                .args(["git", "init", colocation])
                 .arg(&fixture.main)
                 .status()
                 .unwrap();
@@ -765,6 +970,46 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
             String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        }
+
+        /// Since Jujutsu 0.46.0, which added `jj workspace add --colocate`, a
+        /// workspace added from a colocated workspace gets a Git worktree when
+        /// `git.colocate` is true.
+        fn jj_creates_git_worktrees(&self) -> bool {
+            let help = self
+                .command("jj")
+                .args(["workspace", "add", "--help"])
+                .output()
+                .unwrap();
+            let colocate = self
+                .command("jj")
+                .args(["--no-pager", "--ignore-working-copy", "-R"])
+                .arg(&self.main)
+                .args(["config", "get", "git.colocate"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&help.stdout).contains("--colocate")
+                && String::from_utf8_lossy(&colocate.stdout).trim() == "true"
+        }
+
+        fn git_worktrees(&self) -> Vec<PathBuf> {
+            let output = self
+                .command("git")
+                .arg("-C")
+                .arg(&self.main)
+                .args(["worktree", "list", "--porcelain"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .map(PathBuf::from)
+                .collect()
         }
     }
 }
