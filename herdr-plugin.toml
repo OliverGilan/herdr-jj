@@ -1,7 +1,7 @@
 id = "olivergilan.herdr-jj"
 name = "Herdr JJ"
 version = "0.1.0"
-min_herdr_version = "0.8.0"
+min_herdr_version = "0.9.2"
 description = "Create, open, remove, and inspect Jujutsu workspaces from Herdr."
 platforms = ["linux", "macos"]
 

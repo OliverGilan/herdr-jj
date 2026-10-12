@@ -14,8 +14,9 @@ and inspect JJ workspaces with Herdr spaces.
 
 ## Requirements
 
-- Herdr 0.8.0 or newer
+- Herdr 0.9.2 or newer
 - Jujutsu 0.39.0 or newer
+- For colocated workspaces: Jujutsu 0.46.0 or newer and Git 2.42 or newer
 - Rust and Cargo during plugin installation
 - macOS or Linux
 
@@ -130,19 +131,37 @@ then opens the checkout in Herdr. If fetching fails, it uses the locally known
 `trunk()`. If Herdr creation fails, the plugin forgets the new JJ workspace and
 removes only the files created by that operation.
 
+The plugin does not choose colocation itself. When the source workspace is
+colocated and `git.colocate` is `true`, Jujutsu 0.46.0 and newer also register
+the new workspace as a Git worktree, so Git tools work inside it. Older
+releases create a plain JJ workspace.
+
+Creating or opening a colocated workspace uses `herdr worktree open`, so Herdr
+groups it under the main checkout's workspace in the sidebar. Other workspaces
+open as standalone Herdr workspaces with `GH_REPO` set from the `origin`
+remote.
+
 After confirmation, removal snapshots the working copy, moves the checkout to a
 temporary sibling path, and forgets the JJ workspace. If `jj workspace forget`
 fails, the plugin moves the checkout back. Existing bookmarks remain unchanged.
 The temporary checkout is deleted in the background so the Herdr workspace can
 close immediately.
 
+A colocated workspace is also a Git worktree. The plugin moves it with
+`git worktree move` and deletes it with `git worktree remove --force`, so Git's
+worktree list stays in sync. If Git refuses, for example for a worktree with
+submodules, the plugin renames and deletes the checkout directly, then runs
+`git worktree prune`. A locked worktree is not removed: unlock it with
+`git worktree unlock` first.
+
 The main JJ workspace cannot be removed through the plugin.
 
 ## Current Herdr Limit
 
 Herdr plugin v1 can create normal Herdr workspaces. It cannot attach custom
-workspace provenance, group JJ workspaces under a parent row, or add native
-sidebar context-menu actions. These features need a small Herdr host extension.
+workspace provenance or add native sidebar context-menu actions. Only colocated
+workspaces are grouped under a parent row, because Herdr groups by Git
+worktree. These features need a small Herdr host extension.
 
 ## Development
 

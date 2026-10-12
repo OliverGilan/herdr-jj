@@ -166,6 +166,30 @@ impl Herdr {
         })
     }
 
+    /// Open a checkout that is a linked Git worktree of `repository`. Herdr
+    /// groups the new workspace with the repository's workspace.
+    pub fn open_worktree(
+        &self,
+        repository: &Path,
+        path: &Path,
+        label: &str,
+    ) -> Result<CreatedWorkspace> {
+        let mut command = Command::new(&self.binary);
+        command
+            .args(["worktree", "open", "--cwd"])
+            .arg(repository)
+            .arg("--path")
+            .arg(path)
+            .args(["--label", label, "--focus"]);
+        let output = checked_output(&mut command, "open HerdR worktree")?;
+        let envelope: Envelope<WorkspaceCreateResult> =
+            serde_json::from_str(&output).context("invalid HerdR worktree response")?;
+        Ok(CreatedWorkspace {
+            workspace_id: envelope.result.workspace.workspace_id,
+            root_pane_id: envelope.result.root_pane.pane_id,
+        })
+    }
+
     pub fn focus_workspace(&self, workspace_id: &str) -> Result<()> {
         let mut command = Command::new(&self.binary);
         command.args(["workspace", "focus", workspace_id]);
@@ -255,4 +279,66 @@ struct Envelope<T> {
 #[derive(Deserialize)]
 struct SnapshotResult {
     snapshot: Snapshot,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn opens_a_worktree_grouped_under_the_repository() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("args");
+        let herdr = fake_herdr(
+            temp.path(),
+            &log,
+            r#"{"result":{"workspace":{"workspace_id":"w2"},"tab":{},"root_pane":{"pane_id":"w2:p1"},"worktree":{},"already_open":false}}"#,
+        );
+
+        let created = herdr
+            .open_worktree(Path::new("/repo"), Path::new("/ws/feature"), "feature")
+            .unwrap();
+
+        assert_eq!(created.workspace_id, "w2");
+        assert_eq!(created.root_pane_id, "w2:p1");
+        assert_eq!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            [
+                "worktree",
+                "open",
+                "--cwd",
+                "/repo",
+                "--path",
+                "/ws/feature",
+                "--label",
+                "feature",
+                "--focus"
+            ]
+        );
+    }
+
+    /// A Herdr executable that records its arguments, one per line, and
+    /// prints `response`.
+    fn fake_herdr(dir: &Path, log: &Path, response: &str) -> Herdr {
+        use std::os::unix::fs::PermissionsExt;
+
+        let binary = dir.join("herdr");
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{response}'\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        Herdr {
+            binary: binary.into_os_string(),
+            plugin_id: DEFAULT_PLUGIN_ID.to_owned(),
+        }
+    }
 }
