@@ -108,18 +108,33 @@ impl JjRepository {
     }
 
     pub fn current_workspace_name(&self) -> Result<String> {
+        // Workspaces can share a working-copy commit, so the target commit
+        // alone does not identify the current workspace. Match the recorded
+        // workspace root instead.
         let mut command = self.read_command(&self.current_root);
         command.args([
             "workspace",
             "list",
             "-T",
-            "if(target.current_working_copy(), name ++ \"\\n\", \"\")",
+            "name ++ \"\\t\" ++ root ++ \"\\n\"",
         ]);
-        let name = checked_output(&mut command, "identify current JJ workspace")?;
-        if name.is_empty() {
+        let output = checked_output(&mut command, "identify current JJ workspace")?;
+        let mut names = output.lines().filter_map(|line| {
+            let (name, root) = line.split_once('\t')?;
+            let root = Path::new(root);
+            let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+            (root == self.current_root).then_some(name)
+        });
+        let Some(name) = names.next() else {
             bail!("could not identify current JJ workspace");
+        };
+        if names.next().is_some() {
+            bail!(
+                "multiple JJ workspaces share the checkout {}",
+                self.current_root.display()
+            );
         }
-        Ok(name)
+        Ok(name.to_owned())
     }
 
     pub fn list_workspaces(&self) -> Result<Vec<WorkspaceEntry>> {
@@ -592,6 +607,28 @@ mod tests {
                 .iter()
                 .all(|workspace| workspace.name != "feature/api")
         );
+    }
+
+    #[test]
+    fn identifies_the_current_workspace_when_another_shares_its_commit() {
+        let fixture = JjFixture::new();
+        let repository = JjRepository::discover(&fixture.main).unwrap();
+        let parent = repository.capture_current_commit().unwrap();
+        let first = repository
+            .create_workspace(&fixture.workspaces, "first", &parent, false)
+            .unwrap();
+        let second = repository
+            .create_workspace(&fixture.workspaces, "second", &parent, false)
+            .unwrap();
+        // Checking out another workspace's working-copy commit makes both
+        // workspaces point at the same commit.
+        fixture.jj_output(&second.root, &["edit", "first@"]);
+
+        let child = JjRepository::discover(&second.root).unwrap();
+        assert_eq!(child.current_workspace_name().unwrap(), "second");
+
+        repository.rollback_workspace(&second).unwrap();
+        repository.rollback_workspace(&first).unwrap();
     }
 
     #[test]
